@@ -72,9 +72,14 @@ struct GemmImplementationManager : public ImplementationManager {
             return false;
         }
 
+#ifdef OV_GPU_VENDOR_INTEL
         if (one_of(in0_dt, {data_types::f32, data_types::i64}) || one_of(in1_dt, {data_types::f32, data_types::i64})) {
             return false;
         }
+#else
+        if (one_of(in0_dt, {data_types::i64}) || one_of(in1_dt, {data_types::i64}))
+            return false;
+#endif
 
         if (!one_of(in0_layout.format.value, supported_formats) ||
             !one_of(in1_layout.format.value, supported_formats) ||
@@ -93,12 +98,23 @@ struct GemmImplementationManager : public ImplementationManager {
         bool bf16bf16_case = everyone_is(data_types::bf16, in0_dt, in1_dt) &&
                             one_of(out_dt, {data_types::bf16, data_types::f16, data_types::f32, data_types::i8});
         bool u8s8_case = one_of(in0_dt, {data_types::i8, data_types::u8}) &&
-                         one_of(in1_dt, {data_types::i8, data_types::u8}) &&
-                         one_of(out_dt, {data_types::f16, data_types::bf16, data_types::f32, data_types::i32, data_types::i8, data_types::u8});
+                         one_of(in1_dt, {data_types::i8, data_types::u8});
+#ifdef OV_GPU_VENDOR_INTEL
+        u8s8_case = u8s8_case &&
+                    one_of(out_dt, {data_types::f16, data_types::bf16, data_types::f32, data_types::i32, data_types::i8, data_types::u8});
+#else
+        u8s8_case = u8s8_case &&
+                         one_of(out_dt, {data_types::f16, data_types::f32, data_types::i32, data_types::i8, data_types::u8});
+#endif
 
-        if (!f16f16_case && !bf16bf16_case && !u8s8_case) {
+#ifdef OV_GPU_VENDOR_INTEL
+        if (!f16f16_case && !bf16bf16_case && !u8s8_case)
             return false;
-        }
+#else
+        bool f32f32_case = everyone_is(data_types::f32, in0_dt, in1_dt) && one_of(out_dt, {data_types::f32});
+        if (!f32f32_case && !f16f16_case && !u8s8_case)
+            return false;
+#endif
 
         if (gemm_prim->indirect_a || gemm_prim->indirect_b) {
             return false;
