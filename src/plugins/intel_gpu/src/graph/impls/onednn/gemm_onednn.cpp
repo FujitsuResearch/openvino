@@ -282,6 +282,90 @@ protected:
             }
         };
 
+        if (gemm_with_bias) {
+            auto bias_l = in_layouts[2];
+            const auto bias_shape_rank = bias_l.get_partial_shape().rank();
+            if (bias_shape_rank.is_static() && bias_shape_rank.get_length() < static_cast<int64_t>(rank)) {
+                auto bias_shape = bias_l.get_partial_shape();
+                bias_shape.insert(bias_shape.begin(), rank - bias_shape_rank.get_length(), 1);
+                bias_l.set_partial_shape(bias_shape);
+            }
+
+            auto bias_rank = cldnn::format::dimension(bias_l.format);
+            bias_dt = onednn::convert_data_type(bias_l.data_type);
+            bias_dims = onednn::convert_layout(bias_l, bias_rank);
+            bias_fmt = onednn::convert_gemm_data_format(bias_dims, bias_l.format);
+        }
+
+#ifdef OV_GPU_VENDOR_NVIDIA
+        // cuBLAS/cuBLASLt matmul only supports ndims <= 3.
+        // transform_input_layouts() pads inputs to rank >= 4 with leading 1-dims,
+        // causing cuBLAS/cuBLASLt to reject the descriptor.  Strip those padding
+        // dims BEFORE transpose processing so that transpose_format() receives
+        // 2D/3D format tags (ab/abc) it natively supports.
+        // Skip stripping when any tensor has a non-xy-only transpose order, because
+        // transpose_dims_and_format_tag() requires 4D format matching.
+        {
+            auto has_general_transpose = [&](const std::vector<int64_t>& order) {
+                return has_transpose_order(order) && !has_transpose_order_xy_only(order);
+            };
+
+            bool can_strip = !has_general_transpose(prim->input0_transpose_order)
+                          && !has_general_transpose(prim->input1_transpose_order)
+                          && !has_general_transpose(prim->output_transpose_order);
+
+            if (can_strip) {
+                auto count_leading_ones = [](const dnnl::memory::dims& dims) -> size_t {
+                    size_t count = 0;
+                    for (auto d : dims) {
+                        if (d != 1) break;
+                        ++count;
+                    }
+                    return count;
+                };
+
+                size_t max_strip = count_leading_ones(in0_dims);
+                max_strip = std::min(max_strip, count_leading_ones(in1_dims));
+                max_strip = std::min(max_strip, count_leading_ones(out_dims));
+                if (gemm_with_bias)
+                    max_strip = std::min(max_strip, count_leading_ones(bias_dims));
+
+                // Do not strip below ndims=2
+                max_strip = std::min(max_strip, in0_dims.size() - static_cast<size_t>(2));
+
+                // Only strip if it brings ndims to <= 3
+                if (in0_dims.size() - max_strip > 3)
+                    max_strip = 0;
+
+                if (max_strip > 0) {
+                    auto strip_n = [](dnnl::memory::dims& dims, size_t n) {
+                        dims.erase(dims.begin(), dims.begin() + n);
+                    };
+                    auto update_fmt = [](dnnl::memory::format_tag& fmt, size_t ndims) {
+                        if (ndims == 2) fmt = dnnl::memory::format_tag::ab;
+                        else if (ndims == 3) fmt = dnnl::memory::format_tag::abc;
+                    };
+
+                    strip_n(in0_dims, max_strip);
+                    strip_n(in1_dims, max_strip);
+                    strip_n(out_dims, max_strip);
+                    update_fmt(in0_fmt, in0_dims.size());
+                    update_fmt(in1_fmt, in1_dims.size());
+                    update_fmt(out_fmt, out_dims.size());
+
+                    if (gemm_with_bias) {
+                        strip_n(bias_dims, max_strip);
+                        update_fmt(bias_fmt, bias_dims.size());
+                    }
+                    if (!in0_strides.empty())
+                        in0_strides.erase(in0_strides.begin(), in0_strides.begin() + max_strip);
+                    if (!in1_strides.empty())
+                        in1_strides.erase(in1_strides.begin(), in1_strides.begin() + max_strip);
+                }
+            }
+        }
+#endif
+
         if (has_transpose_order(prim->input0_transpose_order)) {
             if (has_transpose_order_xy_only(prim->input0_transpose_order)) {
                 in0_fmt = transpose_format(in0_fmt);
@@ -305,21 +389,6 @@ protected:
             } else {
                 transpose_dims_and_format_tag(prim->output_transpose_order, out_dims, out_fmt, false);
             }
-        }
-
-        if (gemm_with_bias) {
-            auto bias_l = impl_params.get_input_layout(2);
-            const auto bias_shape_rank = bias_l.get_partial_shape().rank();
-            if (bias_shape_rank.is_static() && bias_shape_rank.get_length() < static_cast<int64_t>(rank)) {
-                auto bias_shape = bias_l.get_partial_shape();
-                bias_shape.insert(bias_shape.begin(), rank - bias_shape_rank.get_length(), 1);
-                bias_l.set_partial_shape(bias_shape);
-            }
-
-            auto bias_rank = cldnn::format::dimension(bias_l.format);
-            bias_dt = onednn::convert_data_type(bias_l.data_type);
-            bias_dims = onednn::convert_layout(bias_l, bias_rank);
-            bias_fmt = onednn::convert_gemm_data_format(bias_dims, bias_l.format);
         }
     }
 

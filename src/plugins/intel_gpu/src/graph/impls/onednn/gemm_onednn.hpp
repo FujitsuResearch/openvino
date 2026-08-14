@@ -105,13 +105,23 @@ struct GemmImplementationManager : public ImplementationManager {
         }
 
 #ifdef OV_GPU_VENDOR_NVIDIA
-        // cuDNN matmul doesn't support 5D/6D format tags (abcde, abcdef)
-        // Reject rank > 3 to fall back to OCL kernels
+        // cuBLAS/cuBLASLt matmul only supports ndims <= 3.
+        // Reject original rank > 3 to fall back to OCL kernels.
+        // Inputs with rank <= 3 pass this check and are later padded to 4D with
+        // leading 1-dims by transform_input_layouts(); get_gemm_primitive_md()
+        // strips those padding dims back to <= 3D before creating the oneDNN
+        // descriptor so that cuBLAS/cuBLASLt can be used.
         if (in0_shape.rank().is_static() && in0_shape.rank().get_length() > 3)
             return false;
         if (in1_shape.rank().is_static() && in1_shape.rank().get_length() > 3)
             return false;
         if (out_shape.rank().is_static() && out_shape.rank().get_length() > 3)
+            return false;
+
+        // cuBLAS cublasGemmStridedBatchedEx crashes when the 3D descriptor has
+        // runtime (dynamic) batch dimensions and the actual batch size is 1.
+        if ((in0_shape.is_dynamic() || in1_shape.is_dynamic() || out_shape.is_dynamic()) &&
+            (in0_shape.size() > 2 || in1_shape.size() > 2 || out_shape.size() > 2))
             return false;
 
         // cuDNN matmul only supports a limited set of activation post-ops:
