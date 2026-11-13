@@ -3838,6 +3838,136 @@ INSTANTIATE_TEST_SUITE_P(gemm_gpu, gemm_fp32_combo_tests_onednn, ::testing::Valu
     gemm_base_test_params{ CASE_GEMM_FP32_COMBO_ONEDNN_4, "" },
 }));
 
+#ifdef OV_GPU_VENDOR_NVIDIA
+class gemm_onednn_nvidia : public ::testing::Test {
+protected:
+    template <typename InputT, typename OutputT = InputT>
+    void execute(const ov::Shape& input0_shape,
+                 const ov::Shape& input1_shape,
+                 const std::vector<InputT>& input0_values,
+                 const std::vector<InputT>& input1_values,
+                 const std::vector<float>& expected,
+                 data_types input_data_type,
+                 bool transpose_input0 = false,
+                 bool transpose_input1 = false,
+                 bool is_caching_test = false,
+                 bool force_onednn = true,
+                 data_types output_data_type = data_types::dynamic) {
+        auto& engine = get_test_engine();
+        const auto input0_layout = layout{ov::PartialShape(input0_shape),
+                                          input_data_type,
+                                          format::get_default_format(input0_shape.size())};
+        const auto input1_layout = layout{ov::PartialShape(input1_shape),
+                                          input_data_type,
+                                          format::get_default_format(input1_shape.size())};
+        auto input0 = engine.allocate_memory(input0_layout);
+        auto input1 = engine.allocate_memory(input1_layout);
+        set_values(input0, input0_values);
+        set_values(input1, input1_values);
+
+        const auto result_data_type =
+            output_data_type == data_types::dynamic ? input_data_type : output_data_type;
+        topology topology;
+        topology.add(input_layout("input0", input0_layout),
+                     input_layout("input1", input1_layout),
+                     gemm("gemm",
+                          {input_info("input0"), input_info("input1")},
+                          result_data_type,
+                          transpose_input0,
+                          transpose_input1,
+                          1.0f,
+                          0.0f,
+                          input0_shape.size(),
+                          input1_shape.size()));
+
+        auto config = get_test_default_config(engine);
+        config.set_property(ov::intel_gpu::optimize_data(true));
+        config.set_property(ov::intel_gpu::use_onednn(true));
+        config.set_property(ov::intel_gpu::queue_type(QueueTypes::in_order));
+        if (force_onednn) {
+            config.set_property(ov::intel_gpu::force_implementations(
+                ov::intel_gpu::ImplForcingMap{{"gemm", {format::any, "", impl_types::onednn}}}));
+        }
+        auto network = get_network(engine, topology, config, get_test_stream_ptr(), is_caching_test);
+
+        auto impl = network->get_primitive("gemm")->get_impl();
+        ASSERT_NE(impl, nullptr);
+        ASSERT_NE(impl->m_manager, nullptr);
+        ASSERT_EQ(impl->m_manager->get_impl_type(), impl_types::onednn);
+
+        network->set_input_data("input0", input0);
+        network->set_input_data("input1", input1);
+        auto outputs = network->execute();
+        auto output = outputs.at("gemm").get_memory();
+        mem_lock<OutputT, mem_lock_type::read> output_ptr(output, get_test_stream());
+
+        ASSERT_EQ(output_ptr.size(), expected.size());
+        const float tolerance = result_data_type == data_types::f16 ? 0.01f : 0.0001f;
+        for (size_t i = 0; i < expected.size(); ++i)
+            ASSERT_NEAR(static_cast<float>(output_ptr[i]), expected[i], tolerance) << "index = " << i;
+    }
+};
+
+TEST_F(gemm_onednn_nvidia, fp32_2d_auto_selection) {
+    execute<float>({2, 3},
+                   {3, 2},
+                   {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                   {7.f, 8.f, 9.f, 10.f, 11.f, 12.f},
+                   {58.f, 64.f, 139.f, 154.f},
+                   data_types::f32,
+                   false,
+                   false,
+                   false,
+                   false);
+}
+
+TEST_F(gemm_onednn_nvidia, int8_2d_auto_selection) {
+    execute<int8_t, int32_t>({2, 3},
+                             {3, 2},
+                             {1, -2, 3, 4, 0, -1},
+                             {2, 1, -1, 3, 4, -2},
+                             {16.f, -11.f, 4.f, 6.f},
+                             data_types::i8,
+                             false,
+                             false,
+                             false,
+                             false,
+                             data_types::i32);
+}
+
+TEST_F(gemm_onednn_nvidia, fp16_2d_transposed_weights) {
+    execute<ov::float16>({2, 3},
+                         {2, 3},
+                         {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                         {7.f, 9.f, 11.f, 8.f, 10.f, 12.f},
+                         {58.f, 64.f, 139.f, 154.f},
+                         data_types::f16,
+                         false,
+                         true);
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_3d_batched) {
+    execute<float>({2, 2, 3},
+                   {2, 3, 2},
+                   {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 1.f, 0.f, 2.f, -1.f, 3.f, 1.f},
+                   {7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f},
+                   {58.f, 64.f, 139.f, 154.f, 8.f, -3.f, 1.f, 9.f},
+                   data_types::f32);
+}
+
+TEST_F(gemm_onednn_nvidia, fp16_2d_cached) {
+    execute<ov::float16>({2, 3},
+                         {3, 2},
+                         {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                         {7.f, 8.f, 9.f, 10.f, 11.f, 12.f},
+                         {58.f, 64.f, 139.f, 154.f},
+                         data_types::f16,
+                         false,
+                         false,
+                         true);
+}
+#endif
+
 #endif // ENABLE_ONEDNN_FOR_GPU
 
 class gemm_int8_transposition_tests : public ::GemmBaseTest<gemm_base_test_params, int8_t, uint8_t, float, float, int32_t> {};

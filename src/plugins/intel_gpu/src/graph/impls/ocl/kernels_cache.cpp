@@ -270,12 +270,18 @@ kernels_cache::kernels_cache(engine& engine,
                              uint32_t prog_id,
                              std::shared_ptr<ov::threading::ITaskExecutor> task_executor,
                              const std::map<std::string, std::string>& batch_headers)
-    : _device(engine.get_device())
-    , _builder(engine.create_kernel_builder())
+    : _engine(engine)
+    , _device(engine.get_device())
     , _task_executor(task_executor)
     , _config(config)
     , _prog_id(prog_id)
     , batch_headers(std::move(batch_headers)) { }
+
+void kernels_cache::ensure_builder() {
+    std::call_once(_builder_init_flag, [this] {
+        _builder = _engine.create_kernel_builder();
+    });
+}
 
 #ifdef ENABLE_ONEDNN_FOR_GPU
 // GRF size in bytes of the device. It is needed to locate the end of the host kernel thread payload when checking that
@@ -436,6 +442,8 @@ void kernels_cache::build_all() {
     if (!_pending_compilation)
         return;
 
+    ensure_builder();
+
     std::vector<batch_program> batches;
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -587,6 +595,9 @@ void kernels_cache::load(BinaryInputBuffer& ib) {
 
     size_t num_cached_binaries;
     ib >> num_cached_binaries;
+    if (num_cached_binaries > 0)
+        ensure_builder();
+
     for (size_t i = 0; i < num_cached_binaries; ++i) {
         bool is_driver_agnostic_binary = true;
 
@@ -631,6 +642,8 @@ kernels_cache::compiled_kernels kernels_cache::compile(const kernel_impl_params&
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "KernelsCache::compile");
     if (kernel_sources.empty())
         return {};
+
+    ensure_builder();
 
     kernels_code t_kernels_code;
 

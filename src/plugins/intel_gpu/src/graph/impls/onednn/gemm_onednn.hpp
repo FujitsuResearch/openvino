@@ -106,16 +106,13 @@ struct GemmImplementationManager : public ImplementationManager {
 
 #ifdef OV_GPU_VENDOR_NVIDIA
         // cuBLAS/cuBLASLt matmul only supports ndims <= 3.
-        // Reject original rank > 3 to fall back to OCL kernels.
+        // Use the primitive's original ranks because output shape inference pads
+        // lower-rank tensors to the output format rank before implementation selection.
         // Inputs with rank <= 3 pass this check and are later padded to 4D with
         // leading 1-dims by transform_input_layouts(); get_gemm_primitive_md()
         // strips those padding dims back to <= 3D before creating the oneDNN
         // descriptor so that cuBLAS/cuBLASLt can be used.
-        if (in0_shape.rank().is_static() && in0_shape.rank().get_length() > 3)
-            return false;
-        if (in1_shape.rank().is_static() && in1_shape.rank().get_length() > 3)
-            return false;
-        if (out_shape.rank().is_static() && out_shape.rank().get_length() > 3)
+        if (gemm_prim->input_rank > 3 || gemm_prim->weight_rank > 3)
             return false;
 
         // cuBLAS cublasGemmStridedBatchedEx crashes when the 3D descriptor has
