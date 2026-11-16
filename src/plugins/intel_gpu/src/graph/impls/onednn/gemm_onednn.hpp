@@ -23,12 +23,14 @@ struct GemmImplementationManager : public ImplementationManager {
     bool validate_impl(const program_node& node) const override {
         assert(node.is_type<gemm>());
         const auto& config = node.get_program().get_config();
-        if (!config.get_use_onednn())
+        if (!config.get_use_onednn()) {
             return false;
+        }
 #ifdef OV_GPU_VENDOR_INTEL
         const auto& info = node.get_program().get_engine().get_device_info();
-        if (!info.supports_immad || info.arch == gpu_arch::unknown)
+        if (!info.supports_immad || info.arch == gpu_arch::unknown) {
             return false;
+        }
 #endif
 
         const auto& gemm_node = node.as<gemm>();
@@ -49,8 +51,9 @@ struct GemmImplementationManager : public ImplementationManager {
         const auto& out_shape = out_layout.get_partial_shape();
         if (has_rank_less_than(in0_shape, 2) ||
             has_rank_less_than(in1_shape, 2) ||
-            has_rank_less_than(out_shape, 2))
+            has_rank_less_than(out_shape, 2)) {
             return false;
+        }
 
         auto in0_dt = in0_layout.data_type;
         auto in1_dt = in1_layout.data_type;
@@ -94,8 +97,9 @@ struct GemmImplementationManager : public ImplementationManager {
             return false;
         }
 #else
-        if (one_of(in0_dt, {data_types::i64}) || one_of(in1_dt, {data_types::i64}))
+        if (one_of(in0_dt, {data_types::i64}) || one_of(in1_dt, {data_types::i64})) {
             return false;
+        }
 #endif
 
         if (!one_of(in0_layout.format.value, supported_formats) ||
@@ -169,8 +173,9 @@ struct GemmImplementationManager : public ImplementationManager {
 #endif
 
 #ifdef OV_GPU_VENDOR_INTEL
-        if (!f16f16_case && !bf16bf16_case && !u8s8_case)
+        if (!f16f16_case && !bf16bf16_case && !u8s8_case) {
             return false;
+        }
 #else
         bool f32f32_case = everyone_is(data_types::f32, in0_dt, in1_dt) && one_of(out_dt, {data_types::f32});
         if (!f32f32_case && !f16f16_case && !u8s8_case)
