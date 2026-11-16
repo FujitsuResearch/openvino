@@ -182,6 +182,8 @@ protected:
                                       dnnl::memory::format_tag& bias_fmt) {
         auto prim = impl_params.typed_desc<gemm>();
         auto out_l = impl_params.get_output_layout();
+        const auto original_in0_l = impl_params.get_input_layout(0);
+        const auto original_in1_l = impl_params.get_input_layout(1);
 
         std::vector<layout> in_layouts { impl_params.get_input_layout(0), impl_params.get_input_layout(1) };
         if (gemm_with_bias) {
@@ -288,6 +290,34 @@ protected:
             }
         };
 
+        auto get_source_axis_order = [](const layout& source_layout) {
+            std::vector<size_t> axis_order;
+            const auto& rank = source_layout.get_partial_shape().rank();
+            if (source_layout.data_padding || source_layout.format == format::any || rank.is_dynamic()) {
+                return axis_order;
+            }
+
+            const auto source_rank = static_cast<size_t>(rank.get_length());
+            auto source_dims = onednn::convert_layout(source_layout, format::dimension(source_layout.format));
+            for (size_t i = 0; i < source_dims.size(); ++i) {
+                source_dims[i] = i < source_rank ? 2 : 1;
+            }
+            const auto source_fmt = onednn::convert_gemm_data_format(source_dims, source_layout.format);
+            const auto source_strides =
+                dnnl::memory::desc(source_dims, dnnl::memory::data_type::f32, source_fmt).get_strides();
+
+            axis_order.resize(source_rank);
+            for (size_t i = 0; i < source_rank; ++i) {
+                axis_order[i] = i;
+            }
+            std::stable_sort(axis_order.begin(), axis_order.end(), [&](size_t lhs, size_t rhs) {
+                return source_strides[lhs] > source_strides[rhs];
+            });
+            return axis_order;
+        };
+        const auto in0_source_axis_order = get_source_axis_order(original_in0_l);
+        const auto in1_source_axis_order = get_source_axis_order(original_in1_l);
+
         if (gemm_with_bias) {
             auto bias_l = impl_params.get_input_layout(2);
             const auto bias_shape_rank = bias_l.get_partial_shape().rank();
@@ -343,7 +373,9 @@ protected:
                     auto strip_n = [](dnnl::memory::dims& dims, size_t n) {
                         dims.erase(dims.begin(), dims.begin() + n);
                     };
-                    auto reduce_dims_and_format = [&](dnnl::memory::dims& dims, dnnl::memory::format_tag& fmt) {
+                    auto reduce_dims_and_format = [&](dnnl::memory::dims& dims,
+                                                      dnnl::memory::format_tag& fmt,
+                                                      const std::vector<size_t>& source_axis_order = {}) {
                         using tag = dnnl::memory::format_tag;
                         using dt = dnnl::memory::data_type;
                         auto strides = dnnl::memory::desc(dims, dt::f32, fmt).get_strides();
@@ -353,13 +385,30 @@ protected:
                             ? std::vector<tag>{tag::ab, tag::ba}
                             : std::vector<tag>{tag::abc, tag::acb, tag::bac, tag::bca, tag::cab, tag::cba};
                         for (auto candidate : candidates) {
-                            const auto candidate_strides = dnnl::memory::desc(dims, dt::f32, candidate).get_strides();
-                            bool matches = true;
-                            for (size_t i = 0; i < dims.size(); ++i) {
-                                // Singleton strides do not affect memory offsets.
-                                if (dims[i] != 1 && strides[i] != candidate_strides[i]) {
-                                    matches = false;
-                                    break;
+                            bool matches = false;
+                            if (!source_axis_order.empty()) {
+                                dnnl::memory::dims candidate_dims(dims.size(), 2);
+                                const auto candidate_strides =
+                                    dnnl::memory::desc(candidate_dims, dt::f32, candidate).get_strides();
+                                std::vector<size_t> candidate_axis_order(source_axis_order.size());
+                                for (size_t i = 0; i < candidate_axis_order.size(); ++i) {
+                                    candidate_axis_order[i] = i;
+                                }
+                                std::stable_sort(candidate_axis_order.begin(), candidate_axis_order.end(), [&](size_t lhs, size_t rhs) {
+                                    const auto lhs_idx = dims.size() - source_axis_order.size() + lhs;
+                                    const auto rhs_idx = dims.size() - source_axis_order.size() + rhs;
+                                    return candidate_strides[lhs_idx] > candidate_strides[rhs_idx];
+                                });
+                                matches = candidate_axis_order == source_axis_order;
+                            } else {
+                                const auto candidate_strides = dnnl::memory::desc(dims, dt::f32, candidate).get_strides();
+                                matches = true;
+                                for (size_t i = 0; i < dims.size(); ++i) {
+                                    // Singleton strides do not affect memory offsets.
+                                    if (dims[i] != 1 && strides[i] != candidate_strides[i]) {
+                                        matches = false;
+                                        break;
+                                    }
                                 }
                             }
                             if (matches) {
@@ -370,8 +419,8 @@ protected:
                         OPENVINO_THROW("[GPU] Cannot preserve GEMM memory ordering after removing leading dimensions");
                     };
 
-                    reduce_dims_and_format(in0_dims, in0_fmt);
-                    reduce_dims_and_format(in1_dims, in1_fmt);
+                    reduce_dims_and_format(in0_dims, in0_fmt, in0_source_axis_order);
+                    reduce_dims_and_format(in1_dims, in1_fmt, in1_source_axis_order);
                     reduce_dims_and_format(out_dims, out_fmt);
 
                     if (gemm_with_bias) {

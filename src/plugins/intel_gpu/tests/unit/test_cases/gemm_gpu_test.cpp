@@ -4017,11 +4017,11 @@ TEST_F(gemm_onednn_nvidia, fp32_3d_constant_weights_non_default_format) {
         for (bool transpose_weights : {false, true}) {
             const auto weights = weights_format == format::bfxy
                 ? (transpose_weights
-                       ? std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f}
-                       : std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f, 2.f, 0.f, 3.f, 1.f, 4.f, -2.f})
+                       ? std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f, 2.f, 0.f, 3.f, 1.f, 4.f, -2.f}
+                       : std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f})
                 : (transpose_weights
-                       ? std::vector<float>{7.f, 9.f, 11.f, 2.f, 0.f, 3.f, 8.f, 10.f, 12.f, 1.f, 4.f, -2.f}
-                       : std::vector<float>{7.f, 8.f, 2.f, 1.f, 9.f, 10.f, 0.f, 4.f, 11.f, 12.f, 3.f, -2.f});
+                       ? std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f}
+                       : std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f, 2.f, 0.f, 3.f, 1.f, 4.f, -2.f});
             for (bool cached : {false, true}) {
                 SCOPED_TRACE(::testing::Message() << "format=" << format(weights_format).to_string()
                                                  << ", transpose_weights=" << transpose_weights << ", cached=" << cached);
@@ -4049,8 +4049,8 @@ TEST_F(gemm_onednn_nvidia, fp32_2d_constant_weights_non_default_format) {
         execute<float>({2, 3},
                        transpose_weights ? ov::Shape{2, 3} : ov::Shape{3, 2},
                        {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
-                       transpose_weights ? std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f}
-                                         : std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f},
+                       transpose_weights ? std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f}
+                                         : std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f},
                        {58.f, 64.f, 139.f, 154.f},
                        data_types::f32,
                        false,
