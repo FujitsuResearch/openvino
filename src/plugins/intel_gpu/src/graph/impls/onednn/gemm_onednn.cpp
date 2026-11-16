@@ -378,28 +378,44 @@ protected:
                                                       const std::vector<size_t>& source_axis_order = {}) {
                         using tag = dnnl::memory::format_tag;
                         using dt = dnnl::memory::data_type;
+                        const auto original_rank = dims.size();
                         auto strides = dnnl::memory::desc(dims, dt::f32, fmt).get_strides();
                         strip_n(dims, max_strip);
                         strip_n(strides, max_strip);
+                        std::vector<size_t> reduced_source_axis_order;
+                        if (!source_axis_order.empty()) {
+                            OPENVINO_ASSERT(source_axis_order.size() <= original_rank,
+                                            "[GPU] GEMM source rank exceeds descriptor rank");
+                            const auto leading_padding_dims = original_rank - source_axis_order.size();
+                            const auto removed_source_axes =
+                                max_strip > leading_padding_dims ? max_strip - leading_padding_dims : 0;
+                            for (const auto axis : source_axis_order) {
+                                if (axis >= removed_source_axes) {
+                                    reduced_source_axis_order.push_back(axis - removed_source_axes);
+                                }
+                            }
+                            OPENVINO_ASSERT(reduced_source_axis_order.size() <= dims.size(),
+                                            "[GPU] GEMM source axis order exceeds reduced descriptor rank");
+                        }
                         const auto candidates = dims.size() == 2
                             ? std::vector<tag>{tag::ab, tag::ba}
                             : std::vector<tag>{tag::abc, tag::acb, tag::bac, tag::bca, tag::cab, tag::cba};
                         for (auto candidate : candidates) {
                             bool matches = false;
-                            if (!source_axis_order.empty()) {
+                            if (!reduced_source_axis_order.empty()) {
                                 dnnl::memory::dims candidate_dims(dims.size(), 2);
                                 const auto candidate_strides =
                                     dnnl::memory::desc(candidate_dims, dt::f32, candidate).get_strides();
-                                std::vector<size_t> candidate_axis_order(source_axis_order.size());
+                                std::vector<size_t> candidate_axis_order(reduced_source_axis_order.size());
                                 for (size_t i = 0; i < candidate_axis_order.size(); ++i) {
                                     candidate_axis_order[i] = i;
                                 }
                                 std::stable_sort(candidate_axis_order.begin(), candidate_axis_order.end(), [&](size_t lhs, size_t rhs) {
-                                    const auto lhs_idx = dims.size() - source_axis_order.size() + lhs;
-                                    const auto rhs_idx = dims.size() - source_axis_order.size() + rhs;
+                                    const auto lhs_idx = dims.size() - reduced_source_axis_order.size() + lhs;
+                                    const auto rhs_idx = dims.size() - reduced_source_axis_order.size() + rhs;
                                     return candidate_strides[lhs_idx] > candidate_strides[rhs_idx];
                                 });
-                                matches = candidate_axis_order == source_axis_order;
+                                matches = candidate_axis_order == reduced_source_axis_order;
                             } else {
                                 const auto candidate_strides = dnnl::memory::desc(dims, dt::f32, candidate).get_strides();
                                 matches = true;
