@@ -147,7 +147,13 @@ protected:
     static dnnl::memory::format_tag transpose_format(dnnl::memory::format_tag fmt) {
         switch (fmt) {
             case dnnl::memory::format_tag::ab: return dnnl::memory::format_tag::ba;
+            case dnnl::memory::format_tag::ba: return dnnl::memory::format_tag::ab;
             case dnnl::memory::format_tag::abc: return dnnl::memory::format_tag::acb;
+            case dnnl::memory::format_tag::acb: return dnnl::memory::format_tag::abc;
+            case dnnl::memory::format_tag::bac: return dnnl::memory::format_tag::cab;
+            case dnnl::memory::format_tag::bca: return dnnl::memory::format_tag::cba;
+            case dnnl::memory::format_tag::cab: return dnnl::memory::format_tag::bac;
+            case dnnl::memory::format_tag::cba: return dnnl::memory::format_tag::bca;
             case dnnl::memory::format_tag::abcd: return dnnl::memory::format_tag::abdc;
             case dnnl::memory::format_tag::abcde: return dnnl::memory::format_tag::abced;
             case dnnl::memory::format_tag::abcdef: return dnnl::memory::format_tag::abcdfe;
@@ -283,7 +289,7 @@ protected:
         };
 
         if (gemm_with_bias) {
-            auto bias_l = in_layouts[2];
+            auto bias_l = impl_params.get_input_layout(2);
             const auto bias_shape_rank = bias_l.get_partial_shape().rank();
             if (bias_shape_rank.is_static() && bias_shape_rank.get_length() < static_cast<int64_t>(rank)) {
                 auto bias_shape = bias_l.get_partial_shape();
@@ -301,18 +307,14 @@ protected:
         // cuBLAS/cuBLASLt matmul only supports ndims <= 3.
         // transform_input_layouts() pads inputs to rank >= 4 with leading 1-dims,
         // causing cuBLAS/cuBLASLt to reject the descriptor.  Strip those padding
-        // dims BEFORE transpose processing so that transpose_format() receives
-        // 2D/3D format tags (ab/abc) it natively supports.
+        // dims BEFORE transpose processing, preserving the surviving dimensions'
+        // physical ordering in the reduced 2D/3D format tags.
         // Skip stripping when any tensor has a non-xy-only transpose order, because
         // transpose_dims_and_format_tag() requires 4D format matching.
         {
-            auto has_general_transpose = [&](const std::vector<int64_t>& order) {
-                return has_transpose_order(order) && !has_transpose_order_xy_only(order);
-            };
-
-            bool can_strip = !has_general_transpose(prim->input0_transpose_order)
-                          && !has_general_transpose(prim->input1_transpose_order)
-                          && !has_general_transpose(prim->output_transpose_order);
+            bool can_strip = !GemmImplementationManager::has_general_transpose(prim->input0_transpose_order)
+                          && !GemmImplementationManager::has_general_transpose(prim->input1_transpose_order)
+                          && !GemmImplementationManager::has_general_transpose(prim->output_transpose_order);
 
             if (can_strip) {
                 auto count_leading_ones = [](const dnnl::memory::dims& dims) -> size_t {
@@ -341,21 +343,39 @@ protected:
                     auto strip_n = [](dnnl::memory::dims& dims, size_t n) {
                         dims.erase(dims.begin(), dims.begin() + n);
                     };
-                    auto update_fmt = [](dnnl::memory::format_tag& fmt, size_t ndims) {
-                        if (ndims == 2) fmt = dnnl::memory::format_tag::ab;
-                        else if (ndims == 3) fmt = dnnl::memory::format_tag::abc;
+                    auto reduce_dims_and_format = [&](dnnl::memory::dims& dims, dnnl::memory::format_tag& fmt) {
+                        using tag = dnnl::memory::format_tag;
+                        using dt = dnnl::memory::data_type;
+                        auto strides = dnnl::memory::desc(dims, dt::f32, fmt).get_strides();
+                        strip_n(dims, max_strip);
+                        strip_n(strides, max_strip);
+                        const auto candidates = dims.size() == 2
+                            ? std::vector<tag>{tag::ab, tag::ba}
+                            : std::vector<tag>{tag::abc, tag::acb, tag::bac, tag::bca, tag::cab, tag::cba};
+                        for (auto candidate : candidates) {
+                            const auto candidate_strides = dnnl::memory::desc(dims, dt::f32, candidate).get_strides();
+                            bool matches = true;
+                            for (size_t i = 0; i < dims.size(); ++i) {
+                                // Singleton strides do not affect memory offsets.
+                                if (dims[i] != 1 && strides[i] != candidate_strides[i]) {
+                                    matches = false;
+                                    break;
+                                }
+                            }
+                            if (matches) {
+                                fmt = candidate;
+                                return;
+                            }
+                        }
+                        OPENVINO_THROW("[GPU] Cannot preserve GEMM memory ordering after removing leading dimensions");
                     };
 
-                    strip_n(in0_dims, max_strip);
-                    strip_n(in1_dims, max_strip);
-                    strip_n(out_dims, max_strip);
-                    update_fmt(in0_fmt, in0_dims.size());
-                    update_fmt(in1_fmt, in1_dims.size());
-                    update_fmt(out_fmt, out_dims.size());
+                    reduce_dims_and_format(in0_dims, in0_fmt);
+                    reduce_dims_and_format(in1_dims, in1_fmt);
+                    reduce_dims_and_format(out_dims, out_fmt);
 
                     if (gemm_with_bias) {
-                        strip_n(bias_dims, max_strip);
-                        update_fmt(bias_fmt, bias_dims.size());
+                        reduce_dims_and_format(bias_dims, bias_fmt);
                     }
                     if (!in0_strides.empty())
                         in0_strides.erase(in0_strides.begin(), in0_strides.begin() + max_strip);

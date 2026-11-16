@@ -3841,6 +3841,33 @@ INSTANTIATE_TEST_SUITE_P(gemm_gpu, gemm_fp32_combo_tests_onednn, ::testing::Valu
 #ifdef OV_GPU_VENDOR_NVIDIA
 class gemm_onednn_nvidia : public ::testing::Test {
 protected:
+    void check_transpose_order_support(const std::vector<int64_t>& order, bool expected) {
+        auto& engine = get_test_engine();
+        auto config = get_test_default_config(engine);
+        config.set_property(ov::intel_gpu::use_onednn(true));
+        config.set_property(ov::intel_gpu::queue_type(QueueTypes::in_order));
+        config.set_property(ov::intel_gpu::allow_new_shape_infer(true));
+        for (size_t idx = 0; idx < 3; ++idx) {
+            SCOPED_TRACE(::testing::Message() << "order=" << ::testing::PrintToString(order) << ", tensor=" << idx);
+            std::vector<std::vector<int64_t>> orders{{0, 1, 2}, {0, 1, 2}, {}};
+            orders[idx] = order;
+            const auto input = layout{ov::PartialShape{2, 2, 2}, data_types::f32, format::bfyx};
+            topology topology;
+            topology.add(input_layout("input0", input),
+                         input_layout("input1", input),
+                         gemm("gemm",
+                              {input_info("input0"), input_info("input1")},
+                              data_types::f32,
+                              orders[0],
+                              orders[1],
+                              orders[2]));
+            auto prog = program::build_program(engine, topology, config, false, true);
+            auto& node = prog->get_node("gemm");
+            const auto available_types = node.type()->get_available_impl_types(node);
+            EXPECT_EQ(available_types.count(impl_types::onednn) != 0, expected);
+        }
+    }
+
     template <typename InputT, typename OutputT = InputT>
     void execute(const ov::Shape& input0_shape,
                  const ov::Shape& input1_shape,
@@ -3852,14 +3879,18 @@ protected:
                  bool transpose_input1 = false,
                  bool is_caching_test = false,
                  bool force_onednn = true,
-                 data_types output_data_type = data_types::dynamic) {
+                 data_types output_data_type = data_types::dynamic,
+                 format input1_format = format::any,
+                 bool constant_weights = false) {
         auto& engine = get_test_engine();
         const auto input0_layout = layout{ov::PartialShape(input0_shape),
                                           input_data_type,
                                           format::get_default_format(input0_shape.size())};
         const auto input1_layout = layout{ov::PartialShape(input1_shape),
                                           input_data_type,
-                                          format::get_default_format(input1_shape.size())};
+                                          input1_format == format::any
+                                              ? format::get_default_format(input1_shape.size())
+                                              : input1_format};
         auto input0 = engine.allocate_memory(input0_layout);
         auto input1 = engine.allocate_memory(input1_layout);
         set_values(input0, input0_values);
@@ -3868,9 +3899,12 @@ protected:
         const auto result_data_type =
             output_data_type == data_types::dynamic ? input_data_type : output_data_type;
         topology topology;
-        topology.add(input_layout("input0", input0_layout),
-                     input_layout("input1", input1_layout),
-                     gemm("gemm",
+        topology.add(input_layout("input0", input0_layout));
+        if (constant_weights)
+            topology.add(data("input1", input1));
+        else
+            topology.add(input_layout("input1", input1_layout));
+        topology.add(gemm("gemm",
                           {input_info("input0"), input_info("input1")},
                           result_data_type,
                           transpose_input0,
@@ -3896,7 +3930,8 @@ protected:
         ASSERT_EQ(impl->m_manager->get_impl_type(), impl_types::onednn);
 
         network->set_input_data("input0", input0);
-        network->set_input_data("input1", input1);
+        if (!constant_weights)
+            network->set_input_data("input1", input1);
         auto outputs = network->execute();
         auto output = outputs.at("gemm").get_memory();
         mem_lock<OutputT, mem_lock_type::read> output_ptr(output, get_test_stream());
@@ -3919,6 +3954,16 @@ TEST_F(gemm_onednn_nvidia, fp32_2d_auto_selection) {
                    false,
                    false,
                    false);
+}
+
+TEST_F(gemm_onednn_nvidia, rejects_general_transpose_orders) {
+    for (const auto& order : std::vector<std::vector<int64_t>>{{1, 2, 0}, {2, 0, 1}, {1, 0, 2}, {2, 1, 0}})
+        check_transpose_order_support(order, false);
+}
+
+TEST_F(gemm_onednn_nvidia, accepts_identity_and_xy_transpose_orders) {
+    for (const auto& order : std::vector<std::vector<int64_t>>{{0, 1, 2}, {0, 2, 1}})
+        check_transpose_order_support(order, true);
 }
 
 TEST_F(gemm_onednn_nvidia, int8_2d_auto_selection) {
@@ -3965,6 +4010,57 @@ TEST_F(gemm_onednn_nvidia, fp16_2d_cached) {
                          false,
                          false,
                          true);
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_3d_constant_weights_non_default_format) {
+    for (auto weights_format : {format::bfxy, format::byfx}) {
+        for (bool transpose_weights : {false, true}) {
+            const auto weights = weights_format == format::bfxy
+                ? (transpose_weights
+                       ? std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f}
+                       : std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f, 2.f, 0.f, 3.f, 1.f, 4.f, -2.f})
+                : (transpose_weights
+                       ? std::vector<float>{7.f, 9.f, 11.f, 2.f, 0.f, 3.f, 8.f, 10.f, 12.f, 1.f, 4.f, -2.f}
+                       : std::vector<float>{7.f, 8.f, 2.f, 1.f, 9.f, 10.f, 0.f, 4.f, 11.f, 12.f, 3.f, -2.f});
+            for (bool cached : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "format=" << format(weights_format).to_string()
+                                                 << ", transpose_weights=" << transpose_weights << ", cached=" << cached);
+                execute<float>({2, 2, 3},
+                               transpose_weights ? ov::Shape{2, 2, 3} : ov::Shape{2, 3, 2},
+                               {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 1.f, 0.f, 2.f, -1.f, 3.f, 1.f},
+                               weights,
+                               {58.f, 64.f, 139.f, 154.f, 8.f, -3.f, 1.f, 9.f},
+                               data_types::f32,
+                               false,
+                               transpose_weights,
+                               cached,
+                               false,
+                               data_types::f32,
+                               weights_format,
+                               true);
+            }
+        }
+    }
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_2d_constant_weights_non_default_format) {
+    for (bool transpose_weights : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "transpose_weights=" << transpose_weights);
+        execute<float>({2, 3},
+                       transpose_weights ? ov::Shape{2, 3} : ov::Shape{3, 2},
+                       {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                       transpose_weights ? std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f}
+                                         : std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f},
+                       {58.f, 64.f, 139.f, 154.f},
+                       data_types::f32,
+                       false,
+                       transpose_weights,
+                       false,
+                       false,
+                       data_types::f32,
+                       format::bfxy,
+                       true);
+    }
 }
 #endif
 

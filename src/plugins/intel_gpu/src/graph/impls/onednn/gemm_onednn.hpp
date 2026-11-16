@@ -20,6 +20,17 @@ struct GemmImplementationManager : public ImplementationManager {
     GemmImplementationManager(shape_types shape_type) : ImplementationManager(impl_types::onednn, shape_type) {}
     std::unique_ptr<primitive_impl> create_impl(const program_node& node, const kernel_impl_params& params) const override;
 
+#ifdef OV_GPU_VENDOR_NVIDIA
+    static bool has_general_transpose(const std::vector<int64_t>& order) {
+        for (size_t i = 0; i + 2 < order.size(); ++i) {
+            if (order[i] != static_cast<int64_t>(i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+#endif
+
     bool validate_impl(const program_node& node) const override {
         assert(node.is_type<gemm>());
         const auto& config = node.get_program().get_config();
@@ -116,8 +127,13 @@ struct GemmImplementationManager : public ImplementationManager {
         // leading 1-dims by transform_input_layouts(); get_gemm_primitive_md()
         // strips those padding dims back to <= 3D before creating the oneDNN
         // descriptor so that cuBLAS/cuBLASLt can be used.
-        if (gemm_prim->input_rank > 3 || gemm_prim->weight_rank > 3)
+        // General transposes cannot use the descriptor's leading-dimension reduction.
+        if (gemm_prim->input_rank > 3 || gemm_prim->weight_rank > 3 ||
+            has_general_transpose(gemm_prim->input0_transpose_order) ||
+            has_general_transpose(gemm_prim->input1_transpose_order) ||
+            has_general_transpose(gemm_prim->output_transpose_order)) {
             return false;
+        }
 
         // cuBLAS cublasGemmStridedBatchedEx crashes when the 3D descriptor has
         // runtime (dynamic) batch dimensions and the actual batch size is 1.
