@@ -182,8 +182,10 @@ protected:
                                       dnnl::memory::format_tag& bias_fmt) {
         auto prim = impl_params.typed_desc<gemm>();
         auto out_l = impl_params.get_output_layout();
+#ifdef OV_GPU_VENDOR_NVIDIA
         const auto original_in0_l = impl_params.get_input_layout(0);
         const auto original_in1_l = impl_params.get_input_layout(1);
+#endif
 
         std::vector<layout> in_layouts { impl_params.get_input_layout(0), impl_params.get_input_layout(1) };
         if (gemm_with_bias) {
@@ -290,14 +292,18 @@ protected:
             }
         };
 
-        auto get_source_axis_order = [](const layout& source_layout) {
+#ifdef OV_GPU_VENDOR_NVIDIA
+        auto get_source_axis_order = [](const layout& source_layout, size_t logical_rank) {
             std::vector<size_t> axis_order;
-            const auto& rank = source_layout.get_partial_shape().rank();
+            const auto& source_shape = source_layout.get_partial_shape();
+            const auto& rank = source_shape.rank();
             if (source_layout.data_padding || source_layout.format == format::any || rank.is_dynamic()) {
                 return axis_order;
             }
 
-            const auto source_rank = static_cast<size_t>(rank.get_length());
+            const auto layout_rank = static_cast<size_t>(rank.get_length());
+            // Static GEMM shape normalization extracts the first logical_rank axes.
+            const auto source_rank = source_shape.is_static() ? std::min(layout_rank, logical_rank) : layout_rank;
             auto source_dims = onednn::convert_layout(source_layout, format::dimension(source_layout.format));
             for (size_t i = 0; i < source_dims.size(); ++i) {
                 source_dims[i] = i < source_rank ? 2 : 1;
@@ -315,8 +321,9 @@ protected:
             });
             return axis_order;
         };
-        const auto in0_source_axis_order = get_source_axis_order(original_in0_l);
-        const auto in1_source_axis_order = get_source_axis_order(original_in1_l);
+        const auto in0_source_axis_order = get_source_axis_order(original_in0_l, prim->input_rank);
+        const auto in1_source_axis_order = get_source_axis_order(original_in1_l, prim->weight_rank);
+#endif
 
         if (gemm_with_bias) {
             auto bias_l = impl_params.get_input_layout(2);

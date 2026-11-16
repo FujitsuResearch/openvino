@@ -3881,7 +3881,9 @@ protected:
                  bool force_onednn = true,
                  data_types output_data_type = data_types::dynamic,
                  format input1_format = format::any,
-                 bool constant_weights = false) {
+                 bool constant_weights = false,
+                 size_t weight_rank = 0,
+                 size_t input_rank = 0) {
         auto& engine = get_test_engine();
         const auto input0_layout = layout{ov::PartialShape(input0_shape),
                                           input_data_type,
@@ -3911,8 +3913,8 @@ protected:
                           transpose_input1,
                           1.0f,
                           0.0f,
-                          input0_shape.size(),
-                          input1_shape.size()));
+                          input_rank == 0 ? input0_shape.size() : input_rank,
+                          weight_rank == 0 ? input1_shape.size() : weight_rank));
 
         auto config = get_test_default_config(engine);
         config.set_property(ov::intel_gpu::optimize_data(true));
@@ -4077,6 +4079,64 @@ TEST_F(gemm_onednn_nvidia, fp32_2d_constant_weights_non_default_format) {
                        format::bfxy,
                        true);
     }
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_2d_constant_weights_with_trailing_dimensions) {
+    for (bool transpose_weights : {false, true}) {
+        for (bool cached : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "transpose_weights=" << transpose_weights << ", cached=" << cached);
+            execute<float>({2, 3},
+                           transpose_weights ? ov::Shape{2, 3, 1, 1} : ov::Shape{3, 2, 1, 1},
+                           {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                           transpose_weights ? std::vector<float>{7.f, 9.f, 11.f, 8.f, 10.f, 12.f}
+                                             : std::vector<float>{7.f, 8.f, 9.f, 10.f, 11.f, 12.f},
+                           {58.f, 64.f, 139.f, 154.f},
+                           data_types::f32,
+                           false,
+                           transpose_weights,
+                           cached,
+                           false,
+                           data_types::f32,
+                           format::bfxy,
+                           true,
+                           2);
+        }
+    }
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_2d_input_and_weights_with_trailing_dimensions) {
+    execute<float>({2, 3, 1, 1},
+                   {3, 2, 1, 1},
+                   {1.f, 2.f, 3.f, 4.f, 5.f, 6.f},
+                   {7.f, 8.f, 9.f, 10.f, 11.f, 12.f},
+                   {58.f, 64.f, 139.f, 154.f},
+                   data_types::f32,
+                   false,
+                   false,
+                   false,
+                   false,
+                   data_types::f32,
+                   format::bfxy,
+                   true,
+                   2,
+                   2);
+}
+
+TEST_F(gemm_onednn_nvidia, fp32_3d_constant_weights_with_trailing_dimension) {
+    execute<float>({2, 2, 3},
+                   {2, 3, 2, 1},
+                   {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 1.f, 0.f, 2.f, -1.f, 3.f, 1.f},
+                   {7.f, 8.f, 9.f, 10.f, 11.f, 12.f, 2.f, 1.f, 0.f, 4.f, 3.f, -2.f},
+                   {58.f, 64.f, 139.f, 154.f, 8.f, -3.f, 1.f, 9.f},
+                   data_types::f32,
+                   false,
+                   false,
+                   false,
+                   false,
+                   data_types::f32,
+                   format::bfxy,
+                   true,
+                   3);
 }
 #endif
 
